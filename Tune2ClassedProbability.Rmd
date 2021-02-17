@@ -1,0 +1,243 @@
+---
+title: "ManuallyTuneandPredict2classedMLWAM"
+author: "William Lidberg"
+date: "2020 M08 28"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load packages
+```{r echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+library(caret)
+library(raster)
+library(rgdal)
+library(doParallel)
+library(xgboost)
+library(ggplot2)
+library(cluster)
+```
+
+
+
+Load training data
+```{r echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+OriginalDataNumeric<-read.table("X:/MLWAM_Production/TrainingData/TrainingData_Probability.txt",  stringsAsFactors=FALSE, header = TRUE, dec = ".")
+OriginalDataNumeric<-na.omit(OriginalDataNumeric)
+
+#Set moisture label to factor
+binarydataset<-OriginalDataNumeric
+colsF <- c("binaryMoisture","soil","wetlands")
+binarydataset[colsF]<- lapply(binarydataset[colsF], factor)
+str(binarydataset)
+```
+
+
+
+```{r}
+#plot distribution
+library(ggplot2)
+library(RColorBrewer)
+cols <- c("1"="#D95F02","2"="#1B9E77")
+two<-ggplot(data=binarydataset, aes(x=binaryMoisture)) + 
+  geom_bar(aes(fill = binaryMoisture)) +
+  labs(title = "", x = "", y = "Number of points")
+two + theme_bw() + theme(legend.position = "none") + theme(axis.text = element_text(angle = 90),panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + scale_fill_manual(values = cols)
+```
+
+
+
+split data into training data 80 % and test data 20 %.
+```{r message = FALSE}
+#split two classed dataset
+set.seed(42)
+binaryTrainingDataIndex<- createDataPartition(binarydataset$binaryMoisture, p=0.8, list = FALSE)
+binarytrainingData <- binarydataset[binaryTrainingDataIndex,]
+binarytestData <- binarydataset[-binaryTrainingDataIndex,]
+
+```
+
+Start by tuning max depth and learning rate (eta) while leaving everything else as default. Learning rate controls how much information from a new tree will be used in the Boosting. If it is close to zero we will use only a small piece of information from each new tree. If we set eta to 1 we will use all information from the new tree. Big values of eta result in a faster convergence and more over-fitting problems. Small values may need to many trees to converge.
+```{r message = FALSE}
+set.seed(42)
+
+#Tune grid
+XGBoostgrid1 = expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50), 
+  max_depth = c(2,3,4,5), 
+  eta = c(0.025, 0.05, 0.1, 0.3), 
+  gamma = c(0), 
+  colsample_bytree = c(1), 
+  min_child_weight = c(1),
+  rate_drop = c(0),
+  skip_drop = c(0),
+  subsample = c(1)
+)
+
+#Five fold cross validation will be used for tuning
+tune_control <- caret::trainControl(method = "cv", number = 10, verboseIter = FALSE, allowParallel = TRUE)
+
+xgbDARTtuningmodel2classedseed <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid1, method = "xgbDART",verbose = TRUE, metric="Kappa")
+
+
+ggplot(xgbDARTtuningmodel2classedseed)
+```
+
+We will keep testing some values for max depth around the optimal while we tune rate drop and skip drop. Dropout value is a fraction of previous trees to drop during the dropout. If a dropout is skipped, new trees are added in the same manner as gbtree. If all trees are dropped the model is no different than random forest.
+```{r message = FALSE}
+set.seed(42)
+XGBoostgrid2 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel2classedseed$bestTune$eta,
+  max_depth = c(xgbDARTtuningmodel2classedseed$bestTune$max_depth - 1, xgbDARTtuningmodel2classedseed$bestTune$max_depth, xgbDARTtuningmodel2classedseed$bestTune$max_depth + 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1),
+  rate_drop = c(0,0.25,0.5,0.75,1),
+  skip_drop = c(0,0.25,0.5,0.75,1),
+  subsample = c(1)
+)
+
+xgbDARTtuningmodel2classedseed2 <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid2, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel2classedseed2$bestTune
+ggplot(xgbDARTtuningmodel2classedseed2)
+```
+
+Tune Column and Row Sampling. Subsampling occurs once for every tree constructed.
+```{r message = FALSE}
+XGBoostgrid3 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel2classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel2classedseed2$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.5, 0.75, 1.0),
+  min_child_weight = c(1),
+  rate_drop = xgbDARTtuningmodel2classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel2classedseed2$bestTune$skip_drop,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+xgbDARTtuningmodel2classedseed3 <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid3, method = "xgbDART",verbose = TRUE, metric="Kappa")
+
+xgbDARTtuningmodel2classedseed3$bestTune
+ggplot(xgbDARTtuningmodel2classedseed3)
+```
+
+
+min_child_weigth Controls the minimum number of observations (instances) in a terminal node. The minimum value for this parameter is 1, which allows the tree to have terminal nodes with only one observation. If we use bigger values we limit a possible perfect fit on some observations.
+```{r message = FALSE}
+set.seed(42)
+
+XGBoostgrid4 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel2classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel2classedseed2$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = xgbDARTtuningmodel2classedseed3$bestTune$colsample_bytree,
+  min_child_weight = c(1, 2, 3),
+  rate_drop = xgbDARTtuningmodel2classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel2classedseed2$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel2classedseed3$bestTune$subsample)
+
+xgbDARTtuningmodel2classedseed4 <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid4, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel2classedseed4$bestTune
+ggplot(xgbDARTtuningmodel2classedseed4)
+```
+
+Gamma controls regularization (prevents overfitting). Gamma is minimum loss reduction required to make a further partition on a leaf node of the tree. The larger gamma is, the more conservative the algorithm will be.The main consequence of using a gamma different from 0 is to stop the algorithm from growing useless trees that barely reduce the in-sample error and are likely to result in over-fitting
+
+```{r message = FALSE}
+set.seed(42)
+
+XGBoostgrid5 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel2classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel2classedseed2$bestTune$max_depth,
+  gamma = c(0, 0.1, 0.25, 0.5, 0.75, 1.0),
+  colsample_bytree = xgbDARTtuningmodel2classedseed3$bestTune$colsample_bytree,
+  min_child_weight = xgbDARTtuningmodel2classedseed4$bestTune$min_child_weight,
+  rate_drop = xgbDARTtuningmodel2classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel2classedseed2$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel2classedseed3$bestTune$subsample)
+
+xgbDARTtuningmodel2classedseed5 <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid5, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel2classedseed5$bestTune
+ggplot(xgbDARTtuningmodel2classedseed5)
+```
+
+
+Now we will fix all hyperparamters and train that model on all trainingdata and then test it on the test data.
+```{r message = FALSE}
+Final_control <- caret::trainControl(method = "none", verboseIter = FALSE)
+
+XGBoostgrid6 <- expand.grid(
+  nrounds = xgbDARTtuningmodel2classedseed5$bestTune$nrounds,
+  eta = xgbDARTtuningmodel2classedseed5$bestTune$eta,
+  max_depth = xgbDARTtuningmodel2classedseed5$bestTune$max_depth,
+  gamma = xgbDARTtuningmodel2classedseed5$bestTune$gamma,
+  colsample_bytree = xgbDARTtuningmodel2classedseed5$bestTune$colsample_bytree,
+  min_child_weight = xgbDARTtuningmodel2classedseed5$bestTune$min_child_weight,
+  rate_drop = xgbDARTtuningmodel2classedseed5$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel2classedseed5$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel2classedseed3$bestTune$subsample)
+
+xgbDARTtuningmodel2classedseed6 <- caret::train(binaryMoisture~., data = binarytrainingData, trControl = Final_control, tuneGrid = XGBoostgrid6, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel2classedseed6$bestTune
+```
+
+Test model on the hold out testing data.
+Class 2 = Wet
+Class 1 = Dry
+
+```{r}
+XGBOOSTPredictions <-predict(xgbDARTtuningmodel2classedseed6, binarytestData,ntree_limit=nrounds)
+cmXGBOOST1 <-confusionMatrix(XGBOOSTPredictions, reference=binarytestData$binaryMoisture, positive="1")
+print(cmXGBOOST1)
+XGBoosttable1<-cmXGBOOST1$byClass
+XGBoosttable1
+
+cmXGBOOST0<-confusionMatrix(XGBOOSTPredictions, reference = binarytestData$binaryMoisture,positive="2")
+print(cmXGBOOST0)
+XGBoosttable0<-cmXGBOOST0$byClass
+XGBoosttable0
+```
+
+This plot show how important each variable is. If an unexpected variable is very important it might indicate bias in the data.
+```{r}
+ImportantVariables<-varImp(xgbDARTtuningmodel2classedseed6, scale = FALSE)
+importanceplot<-ggplot(ImportantVariables, top = 23) +theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+ggsave(importanceplot, file = "X:/XGBoostArticle/importanceplot2classes.png", dpi = 600)
+```
+
+
+
+When we put the model into production we will use all data to train the model without resampling. Both the training data and the testing data.
+```{r message = FALSE}
+set.seed(42)
+
+Final_control <- caret::trainControl(method = "none", verboseIter = FALSE)
+Final_grid <- expand.grid(
+  nrounds = xgbDARTtuningmodel2classedseed6$bestTune$nrounds,
+  eta = xgbDARTtuningmodel2classedseed6$bestTune$eta,
+  max_depth = xgbDARTtuningmodel2classedseed6$bestTune$max_depth,
+  gamma = xgbDARTtuningmodel2classedseed6$bestTune$gamma,
+  colsample_bytree = xgbDARTtuningmodel2classedseed6$bestTune$colsample_bytree,
+  min_child_weight = xgbDARTtuningmodel2classedseed6$bestTune$min_child_weight,
+  rate_drop = xgbDARTtuningmodel2classedseed6$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel2classedseed6$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel2classedseed6$bestTune$subsample
+)
+
+xgbDARTtuningmodel_PredictModel <- caret::train(binaryMoisture~., data = binarydataset, trControl = Final_control, tuneGrid = Final_grid, method = "xgbDART",verbose = TRUE, metric="Kappa")
+```
+
+
+Save the trained model for later use
+```{r}
+saveRDS(xgbDARTtuningmodel_PredictModel, "X:/MLWAM_Production/SavedModel/MLWAM2ClassesProbability.rds")
+```
+
+

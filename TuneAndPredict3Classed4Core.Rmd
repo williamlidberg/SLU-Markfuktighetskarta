@@ -1,0 +1,314 @@
+---
+title: "SLU Markfuktighetskarta"
+author: "William Lidberg"
+date: "2020 J06 18"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(cache = TRUE)
+#knitr::opts_chunk$set(eval = FALSE)
+```
+
+Load packages
+```{r echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+library(caret)
+library(raster)
+library(rgdal)
+library(doParallel)
+library(xgboost)
+library(ggplot2)
+library(cluster)
+```
+
+
+
+Load training data and convert appropriate features to factor
+```{r echo=TRUE, warning=FALSE, error=FALSE, message=FALSE}
+OriginalDataNumeric<-read.table("X:/XGBoostArticle/TrainingData/XGBoostTrainingData.txt",  stringsAsFactors=FALSE, header = TRUE, dec = ",")
+OriginalDataNumeric<-na.omit(OriginalDataNumeric)
+
+#Set moisture label to factor
+OriginalData<-OriginalDataNumeric
+colsF <- c("Markfuktig","soil","wetlands")
+OriginalData[colsF]<- lapply(OriginalData[colsF], factor)
+str(OriginalData)
+```
+
+
+Reclassify data into three classes instead of five
+```{r}
+library(RColorBrewer)
+ternaryMoisture<- ifelse(OriginalDataNumeric$Markfuktig<3,1,ifelse(OriginalDataNumeric$Markfuktig>3,3,2))
+ternarydataset<-cbind(OriginalData,ternaryMoisture)
+ternarydataset$Markfuktig<-NULL
+colF <- c("ternaryMoisture")
+ternarydataset[colF]<- lapply(ternarydataset[colF], factor)
+
+#plot distribution
+
+cols <- c("1"="#D95F02","2"="#66A61E","3"="#1B9E77")
+
+three<-ggplot(data=ternarydataset, aes(x=ternaryMoisture)) + 
+  geom_bar(aes(fill = ternaryMoisture)) +
+  labs(title = "", x = "", y = "Number of points")
+
+three + theme_bw() + theme(legend.position = "none") + theme(axis.text = element_text(angle = 90),panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) + scale_fill_manual(values = cols) + scale_x_discrete(labels=c("Dry", "Mesic-moist", "wet")) + theme(axis.text.x = element_text(angle = 0, size=11, hjust = 0.5))
+```
+
+
+
+Split data into training data 80 % and test data 20 %.
+```{r message = FALSE}
+set.seed(42)
+#split three classed dataset
+ternaryTrainingDataIndex<- createDataPartition(ternarydataset$ternaryMoisture, p=0.8, list = FALSE)
+ternarytrainingData <- ternarydataset[ternaryTrainingDataIndex,]
+ternarytestData <- ternarydataset[-ternaryTrainingDataIndex,]
+```
+
+
+Start by tuning max depth and learning rate (eta) while leaving everything else as default. Learning rate controls how much information from a new tree will be used in the Boosting. If it is close to zero we will use only a small piece of information from each new tree. If we set eta to 1 we will use all information from the new tree. Big values of eta result in a faster convergence and more over-fitting problems. Small values may need to many trees to converge.
+```{r message = FALSE}
+set.seed(42)
+
+#Tune grid
+XGBoostgrid1 = expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50), 
+  max_depth = c(2,3,4,5), 
+  eta = c(0.025, 0.05, 0.1, 0.3), 
+  gamma = c(0), 
+  colsample_bytree = c(1), 
+  min_child_weight = c(1),
+  rate_drop = c(0),
+  skip_drop = c(0),
+  subsample = c(1)
+)
+
+#Five fold cross validation will be used for tuning
+tune_control <- caret::trainControl(method = "cv", number = 10, verboseIter = FALSE, allowParallel = TRUE)
+
+xgbDARTtuningmodel3classedseed <- caret::train(ternaryMoisture~., data = ternarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid1, method = "xgbDART",verbose = TRUE, metric="Kappa")
+
+
+#tuneplot(xgbDARTtuningmodel3classedseed)
+ggplot(xgbDARTtuningmodel3classedseed) + theme_bw()
+print(xgbDARTtuningmodel3classedseed$bestTune)
+```
+
+We will keep testing some values for max depth around the optimal while we tune rate drop and skip drop. Dropout value is a fraction of previous trees to drop during the dropout. If a dropout is skipped, new trees are added in the same manner as gbtree. If all trees are dropped the model is no different than random forest.
+```{r message = FALSE}
+set.seed(42)
+XGBoostgrid2 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel3classedseed$bestTune$eta,
+  max_depth = c(xgbDARTtuningmodel3classedseed$bestTune$max_depth - 1, xgbDARTtuningmodel3classedseed$bestTune$max_depth, xgbDARTtuningmodel3classedseed$bestTune$max_depth + 1),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1),
+  rate_drop = c(0,0.25,0.5,0.75,1),
+  skip_drop = c(0,0.25,0.5,0.75,1),
+  subsample = c(1)
+)
+
+xgbDARTtuningmodel3classedseed2 <- caret::train(ternaryMoisture~., data = ternarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid2, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel3classedseed2$bestTune
+#tuneplot(xgbDARTtuningmodel3classedseed2)
+ggplot(xgbDARTtuningmodel3classedseed2) + theme_bw()
+```
+
+Tune Column and Row Sampling. Subsampling occurs once for every tree constructed.
+```{r message = FALSE}
+set.seed(42)
+XGBoostgrid3 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel3classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel3classedseed2$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = c(0.5, 0.75, 1.0),
+  min_child_weight = c(1),
+  rate_drop = xgbDARTtuningmodel3classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel3classedseed2$bestTune$skip_drop,
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+xgbDARTtuningmodel3classedseed3 <- caret::train(ternaryMoisture~., data = ternarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid3, method = "xgbDART",verbose = TRUE, metric="Kappa")
+
+xgbDARTtuningmodel3classedseed3$bestTune
+#tuneplot(xgbDARTtuningmodel3classedseed3)
+ggplot(xgbDARTtuningmodel3classedseed3) + theme_bw()
+```
+
+
+min_child_weigth Controls the minimum number of observations (instances) in a terminal node. The minimum value for this parameter is 1, which allows the tree to have terminal nodes with only one observation. If we use bigger values we limit a possible perfect fit on some observations.
+```{r message = FALSE}
+set.seed(42)
+
+XGBoostgrid4 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel3classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel3classedseed2$bestTune$max_depth,
+  gamma = 0,
+  colsample_bytree = xgbDARTtuningmodel3classedseed3$bestTune$colsample_bytree,
+  min_child_weight = c(1, 2, 3),
+  rate_drop = xgbDARTtuningmodel3classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel3classedseed2$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel3classedseed3$bestTune$subsample)
+
+xgbDARTtuningmodel3classedseed4 <- caret::train(ternaryMoisture~., data = ternarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid4, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel3classedseed4$bestTune
+ggplot(xgbDARTtuningmodel3classedseed4)+ theme_bw()
+```
+
+Gamma controls regularization (prevents overfitting). Gamma is minimum loss reduction required to make a further partition on a leaf node of the tree. The larger gamma is, the more conservative the algorithm will be.The main consequence of using a gamma different from 0 is to stop the algorithm from growing useless trees that barely reduce the in-sample error and are likely to result in over-fitting
+
+```{r message = FALSE}
+set.seed(42)
+
+XGBoostgrid5 <- expand.grid(
+  nrounds = seq(from = 50, to = 500, by = 50),
+  eta = xgbDARTtuningmodel3classedseed$bestTune$eta,
+  max_depth = xgbDARTtuningmodel3classedseed2$bestTune$max_depth,
+  gamma = c(0, 0.1, 0.25, 0.5, 0.75, 1.0),
+  colsample_bytree = xgbDARTtuningmodel3classedseed3$bestTune$colsample_bytree,
+  min_child_weight = xgbDARTtuningmodel3classedseed4$bestTune$min_child_weight,
+  rate_drop = xgbDARTtuningmodel3classedseed2$bestTune$rate_drop,
+  skip_drop = xgbDARTtuningmodel3classedseed2$bestTune$skip_drop,
+  subsample = xgbDARTtuningmodel3classedseed3$bestTune$subsample)
+
+xgbDARTtuningmodel3classedseed5 <- caret::train(ternaryMoisture~., data = ternarytrainingData, trControl = tune_control, tuneGrid = XGBoostgrid5, method = "xgbDART",verbose = TRUE, metric="Kappa")
+xgbDARTtuningmodel3classedseed5$bestTune
+ggplot(xgbDARTtuningmodel3classedseed5) + theme_bw()
+```
+
+
+We can now use the model with the optimal hyperpaamters and test it on the test data.
+
+Test model on the hold out testing data.
+Class 1 = Dry
+Class 2 = Mesic - Moist
+Class 3 = wet
+
+```{r}
+XGBOOSTPredictions <-predict(xgbDARTtuningmodel3classedseed5, ternarytestData,ntree_limit=nrounds)
+cmXGBOOST <-confusionMatrix(XGBOOSTPredictions, ternarytestData$ternaryMoisture)
+print(cmXGBOOST)
+
+XGBoosttable<-cmXGBOOST$byClass
+XGBoosttable
+```
+
+This plot show how important each variable is. Depth to water, topographic wetness index from a 10m dem and mapped wetlands from the swedish property map were the most important variables. If an unexpected variable is very important it might indicate bias in the data.
+```{r}
+ImportantVariables<-varImp(xgbDARTtuningmodel3classedseed5, scale = FALSE)
+importanceplot<-ggplot(ImportantVariables, top = 23) + theme_bw() + theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+importanceplot
+ggsave(importanceplot, file = "x:/XGBoostArticle/importanceplot3classes.png", dpi = 600)
+```
+
+
+
+
+When we put the model into production we will use all data to train the model without resampling. Both the training data and the testing data.
+```{r message = FALSE}
+set.seed(42)
+
+Final_control <- caret::trainControl(method = "none", verboseIter = FALSE)
+Final_grid <- expand.grid(
+  nrounds = 450,
+  eta = 0.025,
+  max_depth = 4,
+  gamma = 0,
+  colsample_bytree = 0.75,
+  min_child_weight = 3,
+  rate_drop = 0,
+  skip_drop = 0,
+  subsample = 0.75
+)
+
+PredictModel <- caret::train(ternaryMoisture~., data = ternarydataset, trControl = Final_control, tuneGrid = Final_grid, method = "xgbDART",verbose = TRUE, metric="Kappa")
+```
+The trained model can be saved and used later
+```{r}
+saveRDS(PredictModel, "X:/MLWAM_Production/SavedModel/MLWAM3Classes.rds")
+#To load the model later simply use:
+#PredictModel <- readRDS("X:/MLWAM_Production/SavedModel/MLWAM3Classes.rds")
+```
+
+
+
+Save predictions to table for further processing
+```{r}
+FinalPredictions <-predict(PredictModel, ternarydataset, ntree_limit=nrounds)
+CompleteTable<-cbind(ternarydataset,FinalPredictions)
+write.table(CompleteTable,"x:/XGBoostArticle/Table3classes.txt", append = FALSE, sep = " ", dec = ".",
+            row.names = TRUE, col.names = TRUE)
+```
+
+
+Finally we can put the model into production and predict soil moisture. All input features are stacked into multibandrasters where each band is one feature. This script will use parallel processing and predict one composite raster on each processor thread.
+```{r echo=FALSE, warning=FALSE, error=FALSE, message=FALSE,eval = FALSE}
+library(doParallel)
+library(cluster)
+UseCores <- detectCores() -1 #Define number of cores to use. Leave one for os.
+cl  <- makeCluster(UseCores)
+registerDoParallel(cl)
+
+#Thanks to Carl Vigren for his assistence with this section.
+
+#set paths
+InputPath <- "F:/MLWAM_Production/RasterStacks"
+OutputPath <- "F:/MLWAM_Production/PredictedThreeClassedMLWAM/"
+
+#Skip files that is already predicted.
+stack_list <- list.files(InputPath, pattern=".tif$", full.names=T) #File ending is case sensetive ".TIF" and ".tif" is not the same.
+in_stack<-list.files(InputPath, pattern = ".tif$", full.names = FALSE) #List of all files in input diretory
+out_stack <- list.files(OutputPath, pattern=".tif$", full.names=FALSE) #List of all files in output directory.
+existing_stack <- !(in_stack %in% out_stack) # TRUE or FALSE, in_stack exists in out_stack.
+stack_list_input <- stack_list[existing_stack] #subset stack_list to include only those which are TRUE in existing_stack.
+
+#Each thread will predict a tile
+foreach(i=1:length(stack_list_input)) %dopar% {
+  library(raster)
+  library(caret)
+  
+  img  <- stack(stack_list_input[i])
+  #Set names of each band
+  names(img)[1]<-paste("Elevation")
+  names(img)[2]<-paste("dtw05")
+  names(img)[3]<-paste("dtw1")
+  names(img)[4]<-paste("dtw5")
+  names(img)[5]<-paste("dtw30")
+  names(img)[6]<-paste("stdv5")
+  names(img)[7]<-paste("Winter")
+  names(img)[8]<-paste("Summer")
+  names(img)[9]<-paste("Autum")
+  names(img)[10]<-paste("soil")
+  names(img)[11]<-paste("wetlands")
+  names(img)[12]<-paste("TWI24m")
+  names(img)[13]<-paste("TWI48m")
+  names(img)[14]<-paste("di2")
+  names(img)[15]<-paste("coordx")
+  names(img)[16]<-paste("coordy")
+  names(img)[17]<-paste("SoilDepth")
+  names(img)[18]<-paste("CVA")
+  names(img)[19]<-paste("DFME")
+  names(img)[20]<-paste("Rugged")
+  names(img)[21]<-paste("SDFS")
+  names(img)[22]<-paste("TWI10m")
+  names(img)[23]<-paste("dtw2")
+  names(img)[24]<-paste("Slope")
+
+  #Predict
+  MLWAM  <- predict(img, PredictModel, ntree_limit=nrounds, factors=list(soil=levels(TrainingData$soil),wetlands=levels(TrainingData$wetlands)), na.rm=TRUE)
+  outname <- sub(pattern = InputPath, replacement = OutputPath, x = stack_list_input[i])
+  writeRaster(MLWAM, filename = outname, overwrite = TRUE) #Save prediction to raster
+}
+
+stopCluster(cl) #end cluster
+registerDoSEQ()
+```
