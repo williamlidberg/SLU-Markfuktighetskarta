@@ -11,6 +11,15 @@ Lidberg, W., Nilsson, M. & Ågren, A. Using machine learning to generate high-re
 
 ![alt text](HappyFunMap.png)
 
+The script Tune2ClassedProbability.Rmd was used to train the model using XGBoost in R.
+
+
+
+
+
+
+
+
 The maps can be downloaded from:
 The swedish forest agency: https://www.skogsstyrelsen.se/sjalvservice/karttjanster/geodatatjanster/ftp/
 The Swedish University of Agricultural Sciences: https://md.nordu.net/role/idp.ds?entityID=https%3A%2F%2Fzeus.slu.se%2Fshibboleth&return=https%3A%2F%2Fzeus.slu.se%2FShibboleth.sso%2FLogin%3FSAMLDS%3D1%26target%3Dss%253Amem%253Aebf97d79a250282574b73e852b84e7653b132140cc02beeb6bb2b0255bb2e610
