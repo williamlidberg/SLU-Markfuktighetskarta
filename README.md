@@ -11,7 +11,7 @@ Lidberg, W., Nilsson, M. & Ågren, A. Using machine learning to generate high-re
 
 ![alt text](HappyFunMap.png)
 
-The script Tune2ClassedProbability.Rmd was used to train the model using XGBoost in R.
+The topographical indices used was extracted using code in the script folder and the script Tune2ClassedProbability.Rmd was used to train the model using XGBoost in R.
 
 
 
