@@ -1,0 +1,38 @@
+start run
+ERROR 000852: Cannot add field POINT_X to D:/MLWAM_Production/Convet_shape_to_raster/XYRaster/Points/1010.shp
+Failed to execute (AddXY).
+
+Done
+
+AddXY).
+
+Done
+AddXY).
+
+Done
+AddXY).
+
+Done
+AddXY).
+
+Done
+AddXY).
+
+Done
+run
+Done
+start run
+Done
+start run
+Done
+start run
+ERROR start run
+Done
+start run
+Done
+o D:/MLWAM_Production/Convet_shape_to_raster/XYRaster/Points/10858.shp
+Failed to execute (AddXY).
+
+Done
+start run
+Done
