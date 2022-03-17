@@ -14,6 +14,8 @@ Lidberg, W., Nilsson, M. & Ågren, A. Using machine learning to generate high-re
 The topographical indices used was extracted using code in the script folder and the script Tune2ClassedProbability.Rmd was used to train the model using XGBoost in R.
 
 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
 
 
 
